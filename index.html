@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>波動関数 崩壊 グリッド</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-white min-h-screen p-4">
+<div class="max-w-2xl mx-auto">
+  <h1 class="text-xl font-bold text-center text-purple-300 mb-1">波動関数 崩壊（WFC）アルゴリズム</h1>
+  <p class="text-center text-gray-400 text-xs mb-3">タイルが「重ね合わせ状態」から1つずつ決定されていく様子を観察</p>
+
+  <div class="flex flex-wrap gap-3 justify-center mb-3">
+    <button onclick="startGenerate()" class="bg-purple-700 hover:bg-purple-600 px-4 py-2 rounded-lg text-sm font-bold" aria-label="生成開始">▶ 生成</button>
+    <button onclick="resetGrid()" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg text-sm" aria-label="リセット">⟳ リセット</button>
+    <button onclick="stepOnce()" class="bg-blue-800 hover:bg-blue-700 px-4 py-2 rounded-lg text-sm" aria-label="1ステップ">1ステップ</button>
+    <label class="flex items-center gap-2 text-xs">
+      速度:
+      <input type="range" id="speedSlider" min="1" max="100" value="50" class="w-20" aria-label="速度スライダー">
+    </label>
+  </div>
+
+  <div class="text-xs text-center text-gray-400 mb-2" id="statusText">生成ボタンで開始してください</div>
+
+  <canvas id="wfcCanvas" class="block mx-auto rounded-lg border border-gray-700" width="400" height="400" aria-label="波動関数崩壊グリッド"></canvas>
+
+  <div class="mt-3 grid grid-cols-5 gap-1 text-xs text-center" aria-label="凡例">
+    <div class="p-1 rounded" style="background:#1a1a2e">重ね合わせ<br><span class="text-gray-500">5状態</span></div>
+    <div class="p-1 rounded" style="background:#16213e">エントロピー<br><span class="text-blue-400">4状態</span></div>
+    <div class="p-1 rounded" style="background:#0f3460">エントロピー<br><span class="text-cyan-400">3状態</span></div>
+    <div class="p-1 rounded" style="background:#533483">エントロピー<br><span class="text-purple-400">2状態</span></div>
+    <div class="p-1 rounded" style="background:#e94560">確定済み<br><span class="text-red-300">1状態</span></div>
+  </div>
+
+  <div class="mt-2 text-xs text-gray-500 text-center">
+    タイル種:
+    <span class="text-red-400">■</span>赤
+    <span class="text-blue-400">■</span>青
+    <span class="text-green-400">■</span>緑
+    <span class="text-yellow-400">■</span>黄
+    <span class="text-purple-400">■</span>紫
+    — 隣接ルール: 同色か隣接色のみ接触可能
+  </div>
+</div>
+
+<script>
+const GRID = 20;
+const CELL = 20;
+const TILES = ['red','blue','green','yellow','purple'];
+const TILE_COLORS = {
+  red:'#e94560', blue:'#0f4c75', green:'#1b6535', yellow:'#b5850a', purple:'#6b2fa0'
+};
+// Adjacency: each tile can be next to itself and adjacent tiles in the color wheel
+const ADJACENT = {
+  red:    ['red','yellow','purple'],
+  blue:   ['blue','red','green'],
+  green:  ['green','blue','yellow'],
+  yellow: ['yellow','green','red'],
+  purple: ['purple','red','blue'],
+};
+
+let grid = [], animTimer = null, running = false;
+
+const canvas = document.getElementById('wfcCanvas');
+const ctx = canvas.getContext('2d');
+
+function makeCell() {
+  return { possible: [...TILES], collapsed: false, tile: null };
+}
+
+function resetGrid() {
+  if(animTimer) { clearInterval(animTimer); animTimer=null; running=false; }
+  grid = [];
+  for(let y=0;y<GRID;y++){
+    grid[y]=[];
+    for(let x=0;x<GRID;x++) grid[y][x]=makeCell();
+  }
+  drawGrid();
+  document.getElementById('statusText').textContent='グリッドをリセットしました';
+}
+
+function getEntropy(cell) {
+  return cell.collapsed ? 0 : cell.possible.length;
+}
+
+function findLowestEntropy() {
+  let min=999, best=[];
+  for(let y=0;y<GRID;y++) for(let x=0;x<GRID;x++){
+    const c=grid[y][x];
+    if(c.collapsed) continue;
+    const e=c.possible.length;
+    if(e<min){min=e;best=[[x,y]];}
+    else if(e===min) best.push([x,y]);
+  }
+  if(best.length===0) return null;
+  return best[Math.floor(Math.random()*best.length)];
+}
+
+function collapse(x,y){
+  const c=grid[y][x];
+  if(!c.possible.length){c.collapsed=true;c.tile=TILES[Math.floor(Math.random()*TILES.length)];return;}
+  c.tile=c.possible[Math.floor(Math.random()*c.possible.length)];
+  c.collapsed=true;
+  c.possible=[c.tile];
+}
+
+function propagate(startX,startY){
+  const queue=[[startX,startY]];
+  const visited=new Set();
+  while(queue.length){
+    const [x,y]=queue.shift();
+    const key=`${x},${y}`;
+    if(visited.has(key)) continue;
+    visited.add(key);
+    const cell=grid[y][x];
+    const dirs=[[0,-1],[0,1],[-1,0],[1,0]];
+    for(const [dx,dy] of dirs){
+      const nx=x+dx,ny=y+dy;
+      if(nx<0||nx>=GRID||ny<0||ny>=GRID) continue;
+      const neighbor=grid[ny][nx];
+      if(neighbor.collapsed) continue;
+      // Find all tiles that have at least one allowed neighbor from current cell's possible set
+      const allowed=new Set();
+      cell.possible.forEach(t=>{
+        (ADJACENT[t]||[t]).forEach(a=>allowed.add(a));
+      });
+      const before=neighbor.possible.length;
+      neighbor.possible=neighbor.possible.filter(t=>allowed.has(t));
+      if(neighbor.possible.length===0) neighbor.possible=[TILES[Math.floor(Math.random()*TILES.length)]];
+      if(neighbor.possible.length<before) queue.push([nx,ny]);
+    }
+  }
+}
+
+function step(){
+  const pos=findLowestEntropy();
+  if(!pos) return false;
+  const [x,y]=pos;
+  collapse(x,y);
+  propagate(x,y);
+  return true;
+}
+
+function stepOnce(){
+  if(!grid.length) resetGrid();
+  step();
+  drawGrid();
+  const done=grid.flat().every(c=>c.collapsed);
+  document.getElementById('statusText').textContent=done?'完成！':'ステップ実行中...';
+}
+
+function drawGrid(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  for(let y=0;y<GRID;y++){
+    for(let x=0;x<GRID;x++){
+      const c=grid[y][x];
+      const px=x*CELL,py=y*CELL;
+      if(c.collapsed){
+        ctx.fillStyle=TILE_COLORS[c.tile]||'#333';
+        ctx.fillRect(px,py,CELL,CELL);
+      } else {
+        const e=c.possible.length;
+        const bg=e>=5?'#1a1a2e':e===4?'#16213e':e===3?'#0f3460':e===2?'#533483':'#6b21a8';
+        ctx.fillStyle=bg;
+        ctx.fillRect(px,py,CELL,CELL);
+        ctx.fillStyle='rgba(255,255,255,0.15)';
+        ctx.font='8px sans-serif';
+        ctx.fillText(e,px+6,py+13);
+      }
+      ctx.strokeStyle='rgba(0,0,0,0.3)';
+      ctx.strokeRect(px,py,CELL,CELL);
+    }
+  }
+}
+
+function startGenerate(){
+  if(running){clearInterval(animTimer);animTimer=null;running=false;document.getElementById('statusText').textContent='一時停止';return;}
+  if(!grid.length||grid.flat().every(c=>c.collapsed)) resetGrid();
+  running=true;
+  function tick(){
+    const slider=document.getElementById('speedSlider');
+    const steps=Math.max(1,Math.floor(slider.value/10));
+    let hasMore=true;
+    for(let i=0;i<steps&&hasMore;i++) hasMore=step();
+    drawGrid();
+    const done=grid.flat().every(c=>c.collapsed);
+    if(done||!hasMore){
+      clearInterval(animTimer);animTimer=null;running=false;
+      document.getElementById('statusText').textContent='✅ 生成完了！';
+    } else {
+      const total=GRID*GRID;
+      const collapsed=grid.flat().filter(c=>c.collapsed).length;
+      document.getElementById('statusText').textContent=`生成中... ${collapsed}/${total}セル確定`;
+    }
+  }
+  animTimer=setInterval(tick,16);
+}
+
+resetGrid();
+</script>
+</body>
+</html>
